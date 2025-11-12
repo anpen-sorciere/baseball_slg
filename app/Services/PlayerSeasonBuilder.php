@@ -446,9 +446,24 @@ class PlayerSeasonBuilder
             [$overall, $isTwoWay] = $this->determineOverallAndTwoWay($data);
             $role = $this->determineRole($data);
 
+            // is_pitcherフラグを設定（投手の役割を持つ、または投手能力がある場合）
+            $isPitcher = in_array($role, ['starter', 'reliever', 'closer'], true)
+                || isset($data['pitching']);
+
             $attributes['overall_rating'] = $overall;
             $attributes['is_two_way'] = $isTwoWay;
             $attributes['role'] = $role;
+            $attributes['is_pitcher'] = $isPitcher;
+
+            // 投手の場合はposition_1に役割を設定（先発、中継ぎ、抑え）
+            if ($isPitcher && in_array($role, ['starter', 'reliever', 'closer'], true)) {
+                $positionMap = [
+                    'starter' => '先発',
+                    'reliever' => '中継ぎ',
+                    'closer' => '抑え',
+                ];
+                $attributes['position_1'] = $positionMap[$role] ?? null;
+            }
 
             if (isset($data['batting'])) {
                 $bat = $data['batting']['ratings'];
@@ -475,10 +490,11 @@ class PlayerSeasonBuilder
                 $attributes['pitcher_stamina'] = $pit['stamina'];
                 $attributes['nf3_pitching_row_id'] = $data['pitching']['nf3_row_id'];
             } else {
-                $attributes['pitcher_velocity'] = null;
-                $attributes['pitcher_control'] = null;
-                $attributes['pitcher_movement'] = null;
-                $attributes['pitcher_stamina'] = null;
+                // 投手データがない場合は0を設定（NOT NULL制約のため）
+                $attributes['pitcher_velocity'] = 0;
+                $attributes['pitcher_control'] = 0;
+                $attributes['pitcher_movement'] = 0;
+                $attributes['pitcher_stamina'] = 0;
                 $attributes['nf3_pitching_row_id'] = null;
             }
 
@@ -608,9 +624,8 @@ class PlayerSeasonBuilder
                 'handed_throw' => $this->normalizeThrowHand($throws),
             ]);
 
-            if ($teamId) {
-                $player->primary_position = null;
-            }
+            // primary_positionカラムは削除済み（position_1, position_2, position_3に変更）
+            // 必要に応じてposition_1などを設定可能だが、ビルド時点では未設定のまま
 
             $player->save();
         } else {

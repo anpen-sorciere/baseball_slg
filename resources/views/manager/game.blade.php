@@ -83,12 +83,15 @@
                     <label for="opponent_custom_team_id" class="form-label">後攻チーム（オリジナルチーム）</label>
                     <select name="opponent_custom_team_id" id="opponent_custom_team_id" class="form-select">
                         <option value="">選択してください</option>
-                        @foreach ($customTeams as $team)
+                        @foreach ($opponentCustomTeams as $team)
                             <option value="{{ $team->id }}" @selected(old('opponent_custom_team_id') == $team->id)>
-                                {{ $team->name }}（{{ $team->year }}年）
+                                {{ $team->name }}（{{ $team->year }}年）@if($team->user) - {{ $team->user->name }}@endif
                             </option>
                         @endforeach
                     </select>
+                    <div class="form-text">
+                        他のユーザーのオリジナルチームとも対戦できます。
+                    </div>
                 </div>
 
                 <div class="col-12">

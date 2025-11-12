@@ -58,6 +58,11 @@ Route::prefix('admin')->middleware(['auth', 'admin'])->group(function () {
     Route::post('/nf3/pitching/paste', [Nf3ImportController::class, 'importPitchingPaste'])
         ->name('admin.nf3.pitching_paste_import');
 
+    Route::get('/nf3/build', [\App\Http\Controllers\Admin\Nf3BuildController::class, 'index'])
+        ->name('admin.nf3.build.index');
+    Route::post('/nf3/build', [\App\Http\Controllers\Admin\Nf3BuildController::class, 'build'])
+        ->name('admin.nf3.build.execute');
+
     Route::get('/player-seasons', [\App\Http\Controllers\Admin\PlayerSeasonController::class, 'index'])
         ->name('admin.player-seasons.index');
 

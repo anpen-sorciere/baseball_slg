@@ -15,7 +15,9 @@ class PlayerSeason extends Model
         'year',
         'league',
         'uniform_number',
-        'position_main',
+        'position_1',
+        'position_2',
+        'position_3',
         'overall_rating',
         'batting_contact',
         'batting_power',
@@ -28,6 +30,7 @@ class PlayerSeason extends Model
         'pitcher_movement',
         'role',
         'is_two_way',
+        'is_pitcher',
         'nf3_batting_row_id',
         'nf3_pitching_row_id',
     ];

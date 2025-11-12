@@ -48,10 +48,18 @@ class GameEngine
             'teamA' => [
                 'index' => 0,
                 'lineup' => array_values($lineups['teamA']['batters'] ?? []),
+                'bench' => array_values($lineups['teamA']['bench_batters'] ?? []),
+                'substituted' => [], // 交代された選手のIDを記録
+                'rbi' => [], // 各打者の打点を記録 [player_season_id => rbi]
+                'stats' => [], // 各打者の打撃成績を記録 [player_season_id => ['ab' => 0, 'h' => 0, 'hr' => 0]]
             ],
             'teamB' => [
                 'index' => 0,
                 'lineup' => array_values($lineups['teamB']['batters'] ?? []),
+                'bench' => array_values($lineups['teamB']['bench_batters'] ?? []),
+                'substituted' => [], // 交代された選手のIDを記録
+                'rbi' => [], // 各打者の打点を記録 [player_season_id => rbi]
+                'stats' => [], // 各打者の打撃成績を記録 [player_season_id => ['ab' => 0, 'h' => 0, 'hr' => 0]]
             ],
         ];
 
@@ -145,8 +153,8 @@ class GameEngine
         }
 
         $battingStats = [
-            'teamA' => $this->generateBattingStats($lineups['teamA']['batters'] ?? [], $scoreA),
-            'teamB' => $this->generateBattingStats($lineups['teamB']['batters'] ?? [], $scoreB),
+            'teamA' => $this->generateBattingStats($lineups['teamA']['batters'] ?? [], $scoreA, $battingState['teamA']['rbi'] ?? [], $battingState['teamA']['stats'] ?? []),
+            'teamB' => $this->generateBattingStats($lineups['teamB']['batters'] ?? [], $scoreB, $battingState['teamB']['rbi'] ?? [], $battingState['teamB']['stats'] ?? []),
         ];
 
         $pitchingStats = [
@@ -274,26 +282,49 @@ class GameEngine
             $prevBases = $bases;
 
             if ($roll < $hrProb) {
+                // 本塁打：打者自身も含めて得点した人数が打点
                 $runsScored = 1;
                 foreach ($prevBases as $occupied) {
                     if ($occupied) {
                         $runsScored++;
                     }
                 }
+                $rbi = $runsScored; // 本塁打の場合は全得点が打点
                 $bases = [false, false, false];
                 $resultType = 'homerun';
             } elseif ($roll < $hrProb + $hitProb) {
+                // 安打：走者が得点した数が打点（打者自身が得点した場合は含まない）
                 $hitRoll = mt_rand(1, 100);
+                $rbi = 0; // 走者が得点した数
                 if ($hitRoll <= 10) {
                     $resultType = 'triple';
-                    $runsScored += $prevBases[2] ? 1 : 0;
-                    $runsScored += $prevBases[1] ? 1 : 0;
-                    $runsScored += $prevBases[0] ? 1 : 0;
+                    $runsScored = 0;
+                    if ($prevBases[2]) {
+                        $runsScored++;
+                        $rbi++;
+                    }
+                    if ($prevBases[1]) {
+                        $runsScored++;
+                        $rbi++;
+                    }
+                    if ($prevBases[0]) {
+                        $runsScored++;
+                        $rbi++;
+                    }
+                    // 三塁打では打者自身も得点できる可能性があるが、通常は含まない
                     $bases = [false, false, true];
                 } elseif ($hitRoll <= 35) {
                     $resultType = 'double';
-                    $runsScored += $prevBases[2] ? 1 : 0;
-                    $runsScored += $prevBases[1] ? 1 : 0;
+                    $runsScored = 0;
+                    if ($prevBases[2]) {
+                        $runsScored++;
+                        $rbi++;
+                    }
+                    if ($prevBases[1]) {
+                        $runsScored++;
+                        $rbi++;
+                    }
+                    // 二塁打では打者自身は得点しない
                     $bases = [
                         false,
                         true,
@@ -301,7 +332,12 @@ class GameEngine
                     ];
                 } else {
                     $resultType = 'single';
-                    $runsScored += $prevBases[2] ? 1 : 0;
+                    $runsScored = 0;
+                    if ($prevBases[2]) {
+                        $runsScored++;
+                        $rbi++;
+                    }
+                    // 一塁打では打者自身は得点しない
                     $bases = [
                         true,
                         $prevBases[0],
@@ -309,19 +345,26 @@ class GameEngine
                     ];
                 }
             } elseif ($roll < $hrProb + $hitProb + $walkProb) {
+                // 四死球：満塁の場合は1打点、それ以外は0打点
                 $resultType = 'walk';
+                $runsScored = 0;
+                $rbi = 0;
                 if ($prevBases[0] && $prevBases[1] && $prevBases[2]) {
                     $runsScored++;
+                    $rbi = 1; // 満塁の場合は1打点
                 }
                 $bases = $this->advanceOnWalk($prevBases);
             } else {
+                // アウト：打点は0
                 $strikeoutChance = $this->clamp(0.18 + ($defenseRatings['pitch'] - $offenseRatings['offense']) / 900, 0.08, 0.45);
                 $resultType = (mt_rand() / mt_getrandmax() < $strikeoutChance) ? 'strikeout' : 'out';
+                $runsScored = 0;
+                $rbi = 0;
                 $outs++;
             }
 
+            // 得点を記録
             if ($runsScored > 0) {
-                $rbi = $runsScored;
                 if ($offenseKey === 'teamA') {
                     $scoreA += $runsScored;
                 } else {
@@ -329,7 +372,43 @@ class GameEngine
                 }
             }
 
+            // 打点を記録
+            $batterId = $batter['player_season_id'] ?? null;
+            if ($batterId && $rbi > 0) {
+                if (!isset($battingState[$offenseKey]['rbi'][$batterId])) {
+                    $battingState[$offenseKey]['rbi'][$batterId] = 0;
+                }
+                $battingState[$offenseKey]['rbi'][$batterId] += $rbi;
+            }
+
+            // 打撃成績を記録
+            if ($batterId) {
+                if (!isset($battingState[$offenseKey]['stats'][$batterId])) {
+                    $battingState[$offenseKey]['stats'][$batterId] = [
+                        'ab' => 0,
+                        'h' => 0,
+                        'hr' => 0,
+                    ];
+                }
+                
+                // 打数を記録（四死球と犠牲バント以外は打数）
+                if ($resultType !== 'walk' && $resultType !== 'hit_by_pitch') {
+                    $battingState[$offenseKey]['stats'][$batterId]['ab']++;
+                }
+                
+                // 安打を記録
+                if (in_array($resultType, ['single', 'double', 'triple', 'homerun'], true)) {
+                    $battingState[$offenseKey]['stats'][$batterId]['h']++;
+                }
+                
+                // 本塁打を記録
+                if ($resultType === 'homerun') {
+                    $battingState[$offenseKey]['stats'][$batterId]['hr']++;
+                }
+            }
+
             $playLog[] = [
+                'batter_id' => $batterId, // 打者のIDを記録
                 'inning' => $inning,
                 'half' => $isTop ? 'top' : 'bottom',
                 'batter_team' => $offenseKey === 'teamA' ? 'A' : 'B',
@@ -385,31 +464,99 @@ class GameEngine
         if (!$lineup) {
             return [
                 'batters' => [],
+                'bench_batters' => [],
                 'pitcher' => null,
                 'relievers' => [],
+                'closers' => [],
             ];
         }
 
+        // スタメン打者（打順1～9番のみ）
         $batters = [];
         $battersCollection = $lineup['batters'] ?? collect();
         $battersCollection = $battersCollection instanceof \Illuminate\Support\Collection
             ? $battersCollection->values()
             : collect($battersCollection)->values();
 
-        foreach ($battersCollection as $index => $season) {
+        // 打順でソート（1～9番のみ）
+        // 打順が設定されていない場合は、最初の9人に自動的に1～9番を割り当て
+        $sortedBatters = $battersCollection->filter(function ($season) {
+            return $season !== null;
+        })->take(9)->values();
+
+        // 打順が設定されている選手と設定されていない選手を分ける
+        $battersWithOrder = $sortedBatters->filter(function ($season) {
+            $order = $season->batting_order ?? null;
+            return $order !== null && $order >= 1 && $order <= 9;
+        });
+
+        $battersWithoutOrder = $sortedBatters->filter(function ($season) {
+            $order = $season->batting_order ?? null;
+            return $order === null || $order < 1 || $order > 9;
+        });
+
+        // 打順が設定されている選手をソート
+        $sortedWithOrder = $battersWithOrder->sortBy('batting_order')->values();
+        
+        // 打順が設定されていない選手に自動的に1～9番を割り当て（既存の打順を避ける）
+        $usedOrders = $sortedWithOrder->pluck('batting_order')->toArray();
+        $availableOrders = array_diff(range(1, 9), $usedOrders);
+        $orderIndex = 0;
+        
+        $sortedWithoutOrder = $battersWithoutOrder->map(function ($season) use (&$orderIndex, $availableOrders) {
+            if ($orderIndex < count($availableOrders)) {
+                $season->batting_order = array_values($availableOrders)[$orderIndex];
+                $orderIndex++;
+            } else {
+                // 9番まで埋まっている場合は、次の番号を割り当て（通常は発生しない）
+                $season->batting_order = 9;
+            }
+            return $season;
+        });
+
+        // 両方を結合してソート
+        $allSortedBatters = $sortedWithOrder->concat($sortedWithoutOrder)->sortBy('batting_order')->values();
+
+        foreach ($allSortedBatters as $season) {
             if (!$season) {
                 continue;
             }
             $player = $season->player ?? null;
+            $order = $season->batting_order ?? 0;
             $batters[] = [
-                'order' => $index + 1,
+                'order' => $order,
                 'name' => ($player && isset($player->name)) ? $player->name : '不明',
-                'position' => $season->position_main ?? (($player && isset($player->primary_position)) ? $player->primary_position : '--'),
+                'position' => $season->position_1 ?? (($player && isset($player->position_1)) ? $player->position_1 : '--'),
                 'contact' => (int) ($season->batting_contact ?? 0),
                 'power' => (int) ($season->batting_power ?? 0),
                 'eye' => (int) ($season->batting_eye ?? 0),
                 'speed' => (int) ($season->running_speed ?? 0),
                 'defense' => (int) ($season->defense ?? 0),
+                'player_season_id' => $season->player_season_id ?? $season->id ?? null,
+            ];
+        }
+
+        // 控え選手（代打・守備交代用）
+        $benchBatters = [];
+        $benchBattersCollection = $lineup['bench_batters'] ?? collect();
+        $benchBattersCollection = $benchBattersCollection instanceof \Illuminate\Support\Collection
+            ? $benchBattersCollection->values()
+            : collect($benchBattersCollection)->values();
+
+        foreach ($benchBattersCollection as $season) {
+            if (!$season) {
+                continue;
+            }
+            $player = $season->player ?? null;
+            $benchBatters[] = [
+                'name' => ($player && isset($player->name)) ? $player->name : '不明',
+                'position' => $season->position_1 ?? (($player && isset($player->position_1)) ? $player->position_1 : '--'),
+                'contact' => (int) ($season->batting_contact ?? 0),
+                'power' => (int) ($season->batting_power ?? 0),
+                'eye' => (int) ($season->batting_eye ?? 0),
+                'speed' => (int) ($season->running_speed ?? 0),
+                'defense' => (int) ($season->defense ?? 0),
+                'player_season_id' => $season->player_season_id ?? $season->id ?? null,
             ];
         }
 
@@ -417,7 +564,7 @@ class GameEngine
         $pitcherPlayer = $pitcherSeason?->player;
         $pitcher = $pitcherSeason ? [
             'name' => ($pitcherPlayer && isset($pitcherPlayer->name)) ? $pitcherPlayer->name : '不明',
-            'position' => $pitcherSeason->position_main ?? 'P',
+            'position' => $pitcherSeason->position_1 ?? 'P',
             'stamina' => (int) ($pitcherSeason->pitcher_stamina ?? 0),
             'control' => (int) ($pitcherSeason->pitcher_control ?? 0),
             'velocity' => (int) ($pitcherSeason->pitcher_velocity ?? 0),
@@ -444,41 +591,59 @@ class GameEngine
             ];
         }
 
+        $closers = [];
+        $closersCollection = $lineup['closers'] ?? collect();
+        $closersCollection = $closersCollection instanceof \Illuminate\Support\Collection
+            ? $closersCollection->values()
+            : collect($closersCollection)->values();
+
+        foreach ($closersCollection as $season) {
+            if (!$season) {
+                continue;
+            }
+            $player = $season->player ?? null;
+            $closers[] = [
+                'name' => ($player && isset($player->name)) ? $player->name : '不明',
+                'stamina' => (int) ($season->pitcher_stamina ?? 0),
+                'control' => (int) ($season->pitcher_control ?? 0),
+                'velocity' => (int) ($season->pitcher_velocity ?? 0),
+                'movement' => (int) ($season->pitcher_movement ?? 0),
+            ];
+        }
+
         return [
             'batters' => $batters,
+            'bench_batters' => $benchBatters,
             'pitcher' => $pitcher,
             'relievers' => $relievers,
+            'closers' => $closers,
         ];
     }
 
-    protected function generateBattingStats(array $batters, int $totalRuns): array
+    protected function generateBattingStats(array $batters, int $totalRuns, array $rbiByPlayerId = [], array $statsByPlayerId = []): array
     {
         $stats = [];
         if (empty($batters)) {
             return $stats;
         }
 
-        $allocatedRuns = 0;
         foreach ($batters as $index => $batter) {
-            $atBats = 3 + ($index % 3);
-            $contact = $batter['contact'] ?? 50;
-            $eye = $batter['eye'] ?? 50;
-            $power = $batter['power'] ?? 50;
-
-            $hitChance = $this->clamp(($contact + $eye) / 260, 0.12, 0.48);
-            $baseHits = $atBats * $hitChance;
-            $extra = mt_rand(0, 100) < 35 ? 1 : 0;
-            $hits = (int) $this->clamp(round($baseHits + $extra - 0.5), 0, $atBats);
-
-            $hr = 0;
-            if ($hits > 0 && $power > 60 && mt_rand(0, 100) < ($power / 1.3)) {
-                $hr = 1;
+            $playerId = $batter['player_season_id'] ?? null;
+            
+            // 実際の試合経過から打撃成績を取得
+            if ($playerId && isset($statsByPlayerId[$playerId])) {
+                $atBats = $statsByPlayerId[$playerId]['ab'] ?? 0;
+                $hits = $statsByPlayerId[$playerId]['h'] ?? 0;
+                $hr = $statsByPlayerId[$playerId]['hr'] ?? 0;
+            } else {
+                // 試合に出場しなかった場合は0
+                $atBats = 0;
+                $hits = 0;
+                $hr = 0;
             }
 
-            $remainingRuns = max(0, $totalRuns - $allocatedRuns);
-            $potentialRbi = max($hr * 2, $hits);
-            $rbi = min($remainingRuns, $potentialRbi);
-            $allocatedRuns += $rbi;
+            // 実際の試合で記録された打点を使用
+            $rbi = $playerId && isset($rbiByPlayerId[$playerId]) ? $rbiByPlayerId[$playerId] : 0;
 
             $stats[] = [
                 'order' => $batter['order'],
@@ -497,8 +662,9 @@ class GameEngine
     {
         $starter = $pitchingLineup['pitcher'] ?? null;
         $relievers = $pitchingLineup['relievers'] ?? [];
+        $closers = $pitchingLineup['closers'] ?? [];
 
-        if (!$starter && empty($relievers)) {
+        if (!$starter && empty($relievers) && empty($closers)) {
             return [];
         }
 
@@ -518,35 +684,116 @@ class GameEngine
         $remainingStrikeouts = max(0, (int) round(($starterVelocity / 14) + ($starterMovement / 16) + mt_rand(0, 3)));
 
         $arms = [];
-        if ($starter) {
+        
+        // 先発投手のアウト数を計算
+        // スタミナに基づいて投球回数を決定
+        // スタミナ100の場合：18～24アウト（6～8回）
+        // スタミナ80の場合：15～21アウト（5～7回）
+        // スタミナ60の場合：12～18アウト（4～6回）
+        // スタミナ40の場合：9～15アウト（3～5回）
+        $starterOutsPotential = $starter 
+            ? max(9, (int) round(($starterStamina / 100) * 18 + mt_rand(-3, 6)))
+            : 0;
+        $starterOuts = min($remainingOuts, $starterOutsPotential);
+        
+        if ($starter && $starterOuts > 0) {
             $arms[] = [
                 'name' => $starter['name'] ?? "{$teamName}投手",
                 'stamina' => $starterStamina,
                 'control' => $starterControl,
                 'velocity' => $starterVelocity,
                 'movement' => $starterMovement,
+                'outs' => $starterOuts, // 先発投手のアウト数を保存
             ];
+            $remainingOuts -= $starterOuts;
         }
 
-        foreach ($relievers as $index => $reliever) {
+        // 9回目（27アウト）以降のアウト数を計算
+        $outsIn9th = max(0, $outsRecorded - 27);
+        $outsBefore9thRemaining = max(0, min(27, $outsRecorded) - $starterOuts);
+
+        // 2番手以降（9回未満）は中継ぎから選択
+        $relieverIndex = 0;
+        $remainingRelieverOuts = $outsBefore9thRemaining;
+        foreach ($relievers as $reliever) {
+            if ($remainingRelieverOuts <= 0) {
+                break;
+            }
+            $relieverStamina = isset($reliever['stamina']) && $reliever['stamina'] > 0 
+                ? (int) $reliever['stamina'] 
+                : max(30, $starterStamina - 20 - $relieverIndex * 5);
+            
+            // 中継ぎ投手が投げられるアウト数を計算
+            $relieverOutsPotential = max(1, (int) round(($relieverStamina / 100) * 9 + mt_rand(0, 4)));
+            $relieverOuts = min($remainingRelieverOuts, $relieverOutsPotential);
+            
+            // リリーフ投手の実際の能力値を使用（設定されていない場合のみ先発から計算）
             $arms[] = [
-                'name' => $reliever['name'] ?? "{$teamName}リリーフ" . ($index + 1),
-                'stamina' => (int) ($reliever['stamina'] ?? max(30, $starterStamina - 20 - $index * 5)),
-                'control' => (int) ($reliever['control'] ?? max(38, $starterControl - 10 - $index * 5)),
-                'velocity' => (int) ($reliever['velocity'] ?? max(40, $starterVelocity - 8 - $index * 4)),
-                'movement' => (int) ($reliever['movement'] ?? max(40, $starterMovement - 8 - $index * 4)),
+                'name' => $reliever['name'] ?? "{$teamName}リリーフ" . ($relieverIndex + 1),
+                'stamina' => $relieverStamina,
+                'control' => isset($reliever['control']) && $reliever['control'] > 0 
+                    ? (int) $reliever['control'] 
+                    : max(38, $starterControl - 10 - $relieverIndex * 5),
+                'velocity' => isset($reliever['velocity']) && $reliever['velocity'] > 0 
+                    ? (int) $reliever['velocity'] 
+                    : max(40, $starterVelocity - 8 - $relieverIndex * 4),
+                'movement' => isset($reliever['movement']) && $reliever['movement'] > 0 
+                    ? (int) $reliever['movement'] 
+                    : max(40, $starterMovement - 8 - $relieverIndex * 4),
+                'outs' => $relieverOuts, // 中継ぎ投手のアウト数を保存
             ];
+            $remainingRelieverOuts -= $relieverOuts;
+            $remainingOuts -= $relieverOuts;
+            $relieverIndex++;
+        }
+
+        // 9回目（27アウト以降）の投手交代時は抑えから選択
+        $remainingCloserOuts = $outsIn9th;
+        if ($remainingCloserOuts > 0 && !empty($closers)) {
+            foreach ($closers as $closer) {
+                if ($remainingCloserOuts <= 0) {
+                    break;
+                }
+                $closerStamina = isset($closer['stamina']) && $closer['stamina'] > 0 
+                    ? (int) $closer['stamina'] 
+                    : max(30, $starterStamina - 20);
+                
+                // 抑え投手が投げられるアウト数を計算
+                $closerOutsPotential = max(1, (int) round(($closerStamina / 100) * 9 + mt_rand(0, 4)));
+                $closerOuts = min($remainingCloserOuts, $closerOutsPotential);
+                
+                // 抑え投手の実際の能力値を使用
+                $arms[] = [
+                    'name' => $closer['name'] ?? "{$teamName}抑え",
+                    'stamina' => $closerStamina,
+                    'control' => isset($closer['control']) && $closer['control'] > 0 
+                        ? (int) $closer['control'] 
+                        : max(38, $starterControl - 10),
+                    'velocity' => isset($closer['velocity']) && $closer['velocity'] > 0 
+                        ? (int) $closer['velocity'] 
+                        : max(40, $starterVelocity - 8),
+                    'movement' => isset($closer['movement']) && $closer['movement'] > 0 
+                        ? (int) $closer['movement'] 
+                        : max(40, $starterMovement - 8),
+                    'outs' => $closerOuts, // 抑え投手のアウト数を保存
+                ];
+                $remainingCloserOuts -= $closerOuts;
+                $remainingOuts -= $closerOuts;
+            }
+        }
+
+        // 残りのアウト数がある場合、最後の投手に追加
+        if ($remainingOuts > 0 && !empty($arms)) {
+            $arms[count($arms) - 1]['outs'] += $remainingOuts;
         }
 
         $statLines = [];
 
         foreach ($arms as $arm) {
-            if ($remainingOuts <= 0) {
-                break;
+            $outsThis = $arm['outs'] ?? 0;
+            if ($outsThis <= 0) {
+                continue;
             }
-
-            $outsPotential = max(1, (int) round(($arm['stamina'] / 100) * 9 + mt_rand(0, 4)));
-            $outsThis = min($remainingOuts, $outsPotential);
 
             $efficiency = max(0.25, 1.05 - ($arm['control'] / 140));
             $erThis = min($remainingRuns, max(0, (int) round($outsThis * $efficiency + mt_rand(-1, 1))));
@@ -563,8 +810,6 @@ class GameEngine
                 'er' => $erThis,
                 'so' => $soThis,
             ];
-
-            $remainingOuts -= $outsThis;
         }
 
         if ($remainingRuns > 0 && !empty($statLines)) {
@@ -636,6 +881,7 @@ class GameEngine
     protected function getNextBatter(string $teamKey, array &$battingState): array
     {
         $lineup = $battingState[$teamKey]['lineup'] ?? [];
+        $substituted = $battingState[$teamKey]['substituted'] ?? [];
         $count = count($lineup);
 
         if ($count === 0) {
@@ -643,13 +889,48 @@ class GameEngine
                 'name' => '名無しの打者',
                 'order' => 0,
                 'position' => '--',
+                'player_season_id' => null,
             ];
         }
 
+        // 打順は1～9番のみを循環（控えは含めない）
         $currentIndex = $battingState[$teamKey]['index'] ?? 0;
         $currentIndex = $currentIndex % $count;
 
         $batter = $lineup[$currentIndex];
+        
+        // 交代された選手が打順に回ってきた場合、控えから代打を選択（簡易実装）
+        // 将来的には、より詳細な代打ロジックを実装可能
+        $batterId = $batter['player_season_id'] ?? null;
+        if ($batterId && in_array($batterId, $substituted, true)) {
+            // 交代された選手の場合は、控えから代打を選択
+            $bench = $battingState[$teamKey]['bench'] ?? [];
+            $availableBench = array_filter($bench, function ($benchPlayer) use ($substituted) {
+                $benchId = $benchPlayer['player_season_id'] ?? null;
+                return $benchId && !in_array($benchId, $substituted, true);
+            });
+            
+            if (!empty($availableBench)) {
+                // 控えから最初の利用可能な選手を代打として選択
+                $pinchHitter = reset($availableBench);
+                $batter = [
+                    'order' => $batter['order'] ?? 0,
+                    'name' => $pinchHitter['name'] ?? '代打',
+                    'position' => $pinchHitter['position'] ?? '--',
+                    'contact' => $pinchHitter['contact'] ?? 0,
+                    'power' => $pinchHitter['power'] ?? 0,
+                    'eye' => $pinchHitter['eye'] ?? 0,
+                    'speed' => $pinchHitter['speed'] ?? 0,
+                    'defense' => $pinchHitter['defense'] ?? 0,
+                    'player_season_id' => $pinchHitter['player_season_id'] ?? null,
+                ];
+                // 代打として使用した選手を交代済みリストに追加
+                if ($batter['player_season_id']) {
+                    $battingState[$teamKey]['substituted'][] = $batter['player_season_id'];
+                }
+            }
+        }
+
         $battingState[$teamKey]['index'] = ($currentIndex + 1) % $count;
 
         return $batter;

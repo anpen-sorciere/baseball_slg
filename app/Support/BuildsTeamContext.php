@@ -13,10 +13,20 @@ trait BuildsTeamContext
             $batters = collect($batters);
         }
 
+        $benchBatters = $lineup['bench_batters'] ?? collect();
+        if (!$benchBatters instanceof Collection) {
+            $benchBatters = collect($benchBatters);
+        }
+
         $pitcher = $lineup['pitcher'] ?? null;
         $relievers = $lineup['relievers'] ?? collect();
         if (!$relievers instanceof Collection) {
             $relievers = collect($relievers);
+        }
+
+        $closers = $lineup['closers'] ?? collect();
+        if (!$closers instanceof Collection) {
+            $closers = collect($closers);
         }
 
         $seasons = $batters->values();
@@ -25,6 +35,9 @@ trait BuildsTeamContext
         }
         if ($relievers->isNotEmpty()) {
             $seasons = $seasons->concat($relievers);
+        }
+        if ($closers->isNotEmpty()) {
+            $seasons = $seasons->concat($closers);
         }
         $seasons = $seasons->filter();
 
@@ -41,8 +54,10 @@ trait BuildsTeamContext
             ], $strategy),
             'lineup' => [
                 'batters' => $batters,
+                'bench_batters' => $benchBatters,
                 'pitcher' => $pitcher,
                 'relievers' => $relievers,
+                'closers' => $closers,
             ],
         ];
     }

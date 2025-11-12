@@ -7,11 +7,23 @@
 @section('content')
     <div class="d-flex align-items-center justify-content-between mb-4">
         <h1 class="h3 mb-0">オリジナルチーム</h1>
-        <a href="{{ route('admin.custom-teams.create') }}" class="btn btn-primary">新規作成</a>
+        @if(!$hasTeam)
+            <a href="{{ route('admin.custom-teams.create') }}" class="btn btn-primary">新規作成</a>
+        @endif
     </div>
 
     @if (session('status'))
         <div class="alert alert-success">{{ session('status') }}</div>
+    @endif
+
+    @if ($errors->has('error'))
+        <div class="alert alert-danger">{{ $errors->first('error') }}</div>
+    @endif
+
+    @if($hasTeam)
+        <div class="alert alert-info">
+            <i class="bi bi-info-circle"></i> 既にオリジナルチームを作成済みです。1アカウントにつき1チームまで作成できます。
+        </div>
     @endif
 
     <div class="card">

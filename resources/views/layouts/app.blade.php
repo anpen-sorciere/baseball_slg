@@ -77,6 +77,9 @@
                             <li><h6 class="dropdown-header">インポート</h6></li>
                             <li><a class="dropdown-item" href="{{ route('admin.nf3.batting_paste_form') }}">打撃データインポート</a></li>
                             <li><a class="dropdown-item" href="{{ route('admin.nf3.pitching_paste_form') }}">投手データインポート</a></li>
+                            <li><hr class="dropdown-divider"></li>
+                            <li><h6 class="dropdown-header">ビルド</h6></li>
+                            <li><a class="dropdown-item" href="{{ route('admin.nf3.build.index') }}">選手能力値ビルド</a></li>
                         </ul>
                     </li>
                     @endif

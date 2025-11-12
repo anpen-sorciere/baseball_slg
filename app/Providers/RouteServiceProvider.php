@@ -28,6 +28,13 @@ class RouteServiceProvider extends ServiceProvider
     {
         $this->configureRateLimiting();
 
+        // CustomTeamのルートモデルバインディング：自分のチームのみ取得可能
+        Route::bind('customTeam', function ($value) {
+            return \App\Models\CustomTeam::where('id', $value)
+                ->where('user_id', auth()->id())
+                ->firstOrFail();
+        });
+
         $this->routes(function () {
             Route::middleware('api')
                 ->prefix('api')

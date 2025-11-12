@@ -21,15 +21,25 @@ class CustomGameController extends Controller
 
     public function index()
     {
+        // 自分のチーム（先攻チーム用）
         $customTeams = CustomTeam::where('user_id', auth()->id())
             ->where('type', 'original')
             ->orderByDesc('year')
             ->orderBy('name')
             ->get();
+        
+        // 全ユーザーのオリジナルチーム（対戦相手用）
+        $opponentCustomTeams = CustomTeam::with('user')
+            ->where('type', 'original')
+            ->orderByDesc('year')
+            ->orderBy('name')
+            ->get();
+        
         $teams = Team::orderBy('name')->get();
 
         return view('manager.game', [
             'customTeams' => $customTeams,
+            'opponentCustomTeams' => $opponentCustomTeams,
             'teams' => $teams,
         ]);
     }
@@ -60,10 +70,36 @@ class CustomGameController extends Controller
             Log::info('Manager game simulation started');
             
             $data = $request->validate([
-                'custom_team_id' => ['required', 'integer', 'exists:custom_teams,id'],
+                'custom_team_id' => [
+                    'required',
+                    'integer',
+                    function ($attribute, $value, $fail) {
+                        $exists = CustomTeam::where('id', $value)
+                            ->where('user_id', auth()->id())
+                            ->where('type', 'original')
+                            ->exists();
+                        if (!$exists) {
+                            $fail('選択したチームは存在しないか、アクセス権限がありません。');
+                        }
+                    },
+                ],
                 'opponent_type' => ['required', 'in:npb,custom'],
                 'opponent_team_id' => ['required_if:opponent_type,npb', 'nullable', 'integer', 'exists:teams,id'],
-                'opponent_custom_team_id' => ['required_if:opponent_type,custom', 'nullable', 'integer', 'exists:custom_teams,id'],
+                'opponent_custom_team_id' => [
+                    'required_if:opponent_type,custom',
+                    'nullable',
+                    'integer',
+                    function ($attribute, $value, $fail) {
+                        if ($value) {
+                            $exists = CustomTeam::where('id', $value)
+                                ->where('type', 'original')
+                                ->exists();
+                            if (!$exists) {
+                                $fail('選択した対戦相手チームは存在しません。');
+                            }
+                        }
+                    },
+                ],
             ]);
             Log::info('Validation passed', ['data' => $data]);
 
@@ -114,8 +150,7 @@ class CustomGameController extends Controller
                     },
                     'players.playerSeason.player',
                     'players.playerSeason.team',
-                ])->where('user_id', auth()->id())
-                  ->where('type', 'original')
+                ])->where('type', 'original')
                   ->findOrFail($data['opponent_custom_team_id']);
 
                 [$opponentLineup, $opponentErrors] = $this->buildCustomTeamLineup($opponentCustomTeam);
@@ -143,6 +178,16 @@ class CustomGameController extends Controller
 
             Log::info('Saving game result');
             // 試合結果を保存
+            // result_jsonにチーム名を追加して保存
+            $result['team_names'] = [
+                'teamA' => $customTeam->name,
+                'teamB' => $opponentName,
+            ];
+            $result['opponent_type'] = $data['opponent_type'];
+            if ($data['opponent_type'] === 'custom') {
+                $result['opponent_custom_team_id'] = $data['opponent_custom_team_id'];
+            }
+            
             $game = Game::create([
                 'year' => $year,
                 'team_a_id' => null, // 先攻チームは常にオリジナルチームなのでnull
@@ -197,13 +242,29 @@ class CustomGameController extends Controller
 
         $playerEntries = $customTeam->players->loadMissing('playerSeason.player');
 
-        $battersEntries = $playerEntries
+        // 打順1～9番の選手（スタメン）
+        $startingBattersEntries = $playerEntries
             ->where('is_pitcher', false)
+            ->filter(function (CustomTeamPlayer $entry) {
+                return $entry->batting_order !== null && $entry->batting_order >= 1 && $entry->batting_order <= 9;
+            })
             ->sortBy('batting_order')
             ->values();
 
-        if ($battersEntries->isEmpty()) {
+        // 控え選手（打順がnullまたは10番以降）
+        $benchBattersEntries = $playerEntries
+            ->where('is_pitcher', false)
+            ->filter(function (CustomTeamPlayer $entry) {
+                return $entry->batting_order === null || $entry->batting_order > 9;
+            })
+            ->values();
+
+        if ($startingBattersEntries->isEmpty()) {
             $errors->push('打順が設定されていません。スタメンを編集してください。');
+        }
+
+        if ($startingBattersEntries->count() < 9) {
+            $errors->push('打順1～9番がすべて設定されていません。スタメンを編集してください。');
         }
 
         $pitcherEntry = $playerEntries->firstWhere('is_starting_pitcher', true)
@@ -212,52 +273,94 @@ class CustomGameController extends Controller
             $errors->push('先発投手が設定されていません。スタメンを編集してください。');
         }
 
-        $batters = $battersEntries->map(function (CustomTeamPlayer $entry) {
+        // スタメン打者（打順1～9番）
+        $batters = $startingBattersEntries->map(function (CustomTeamPlayer $entry) {
             $season = $entry->playerSeason;
             if (!$season) {
                 return null;
             }
             $season = clone $season;
-            $season->setAttribute('position_main', $entry->position ?? $season->position_main);
+            $season->setAttribute('position_1', $entry->position ?? $season->position_1);
             $season->setAttribute('batting_order', $entry->batting_order);
+            $season->setAttribute('player_season_id', $season->id);
+            return $season;
+        })->filter();
+
+        // 控え選手（代打・守備交代用）
+        $benchBatters = $benchBattersEntries->map(function (CustomTeamPlayer $entry) {
+            $season = $entry->playerSeason;
+            if (!$season) {
+                return null;
+            }
+            $season = clone $season;
+            $season->setAttribute('position_1', $entry->position ?? $season->position_1);
+            $season->setAttribute('player_season_id', $season->id);
             return $season;
         })->filter();
 
         $pitcher = null;
         $relievers = collect();
+        $closers = collect();
         if ($pitcherEntry && $pitcherEntry->playerSeason) {
             $pitcherSeason = clone $pitcherEntry->playerSeason;
-            $pitcherSeason->setAttribute('position_main', $pitcherEntry->position ?? ($pitcherSeason->position_main ?? 'P'));
+            $pitcherSeason->setAttribute('position_1', $pitcherEntry->position ?? ($pitcherSeason->position_1 ?? 'P'));
             $pitcher = $pitcherSeason;
 
-            $relievers = $playerEntries
+            // 中継ぎと抑えを分けて取得
+            $relieverEntries = $playerEntries
                 ->where('is_pitcher', true)
                 ->reject(function (CustomTeamPlayer $entry) use ($pitcherEntry) {
                     return $pitcherEntry && $entry->id === $pitcherEntry->id;
                 })
-                ->sortBy('id')
-                ->take(2)
-                ->map(function (CustomTeamPlayer $entry) {
-                    if (!$entry->playerSeason) {
-                        return null;
-                    }
-                    $season = clone $entry->playerSeason;
-                    // playerリレーションを確実にロード
-                    if (!$season->relationLoaded('player')) {
-                        $season->load('player');
-                    }
-                    return $season;
+                ->filter(function (CustomTeamPlayer $entry) {
+                    return $entry->pitcher_role === 'reliever';
                 })
-                ->filter()
+                ->sortBy('id')
                 ->values();
 
-            if ($relievers->isEmpty() && $pitcherSeason->team_id) {
-                $relievers = PlayerSeason::with('player')
+            $closerEntries = $playerEntries
+                ->where('is_pitcher', true)
+                ->reject(function (CustomTeamPlayer $entry) use ($pitcherEntry) {
+                    return $pitcherEntry && $entry->id === $pitcherEntry->id;
+                })
+                ->filter(function (CustomTeamPlayer $entry) {
+                    return $entry->pitcher_role === 'closer';
+                })
+                ->sortBy('id')
+                ->values();
+
+            // 中継ぎ投手を取得
+            $relievers = $relieverEntries->map(function (CustomTeamPlayer $entry) {
+                if (!$entry->playerSeason) {
+                    return null;
+                }
+                $season = clone $entry->playerSeason;
+                if (!$season->relationLoaded('player')) {
+                    $season->load('player');
+                }
+                return $season;
+            })->filter()->values();
+
+            // 抑え投手を取得
+            $closers = $closerEntries->map(function (CustomTeamPlayer $entry) {
+                if (!$entry->playerSeason) {
+                    return null;
+                }
+                $season = clone $entry->playerSeason;
+                if (!$season->relationLoaded('player')) {
+                    $season->load('player');
+                }
+                return $season;
+            })->filter()->values();
+
+            // フォールバック：リリーフ投手が登録されていない場合
+            if ($relievers->isEmpty() && $closers->isEmpty() && $pitcherSeason->team_id) {
+                $fallbackRelievers = PlayerSeason::with('player')
                     ->where('team_id', $pitcherSeason->team_id)
                     ->where('year', $customTeam->year)
                     ->where('id', '<>', $pitcherSeason->id)
                     ->where(function ($query) {
-                        $query->whereIn('role', ['starter', 'reliever', 'closer'])
+                        $query->whereIn('role', ['reliever', 'closer'])
                             ->orWhere('pitcher_velocity', '>', 0);
                     })
                     ->orderByDesc('pitcher_velocity')
@@ -265,19 +368,23 @@ class CustomGameController extends Controller
                     ->get()
                     ->map(function (PlayerSeason $season) {
                         $cloned = clone $season;
-                        // playerリレーションを確実にロード
                         if (!$cloned->relationLoaded('player')) {
                             $cloned->load('player');
                         }
                         return $cloned;
                     });
+                
+                // フォールバックの投手を中継ぎとして扱う
+                $relievers = $fallbackRelievers;
             }
         }
 
         return [[
             'batters' => $batters instanceof Collection ? $batters : collect($batters),
+            'bench_batters' => $benchBatters instanceof Collection ? $benchBatters : collect($benchBatters),
             'pitcher' => $pitcher,
             'relievers' => $relievers instanceof Collection ? $relievers : collect($relievers),
+            'closers' => $closers instanceof Collection ? $closers : collect($closers),
         ], $errors];
     }
 }

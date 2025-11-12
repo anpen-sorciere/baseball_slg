@@ -25,13 +25,27 @@
                         @php
                             $result = $game->result_json ?? [];
                             // 先攻チーム（teamA）は常にオリジナルチーム
-                            $teamAName = $result['lineups']['teamA']['team_name'] ?? ($game->customTeam->name ?? '不明');
+                            $teamAName = $result['team_names']['teamA'] ?? ($game->customTeam->name ?? '不明');
                             
                             // 後攻チーム（teamB）の名前を取得
-                            // 1. result_jsonから取得を試みる
-                            // 2. teamBリレーションから取得（NPBチームの場合）
-                            // 3. それでも取得できない場合は「不明」
-                            $teamBName = $result['lineups']['teamB']['team_name'] ?? (optional($game->teamB)->name ?? '不明');
+                            // 1. result_jsonのteam_namesから取得
+                            // 2. opponent_custom_team_idから取得（他のアカウントのオリジナルチームの場合）
+                            // 3. teamBリレーションから取得（NPBチームの場合）
+                            // 4. それでも取得できない場合は「不明」
+                            $teamBName = $result['team_names']['teamB'] ?? '不明';
+                            
+                            // 対戦相手が他のアカウントのオリジナルチームの場合
+                            if ($teamBName === '不明' && isset($result['opponent_custom_team_id'])) {
+                                $opponentCustomTeam = \App\Models\CustomTeam::find($result['opponent_custom_team_id']);
+                                if ($opponentCustomTeam) {
+                                    $teamBName = $opponentCustomTeam->name;
+                                }
+                            }
+                            
+                            // NPBチームの場合
+                            if ($teamBName === '不明' && $game->teamB) {
+                                $teamBName = $game->teamB->name;
+                            }
                         @endphp
                         <tr>
                             <td>{{ $game->created_at->format('Y-m-d H:i') }}</td>

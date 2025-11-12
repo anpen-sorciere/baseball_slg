@@ -55,12 +55,57 @@
                             <span id="batter-count" class="{{ $selectedBatterCount > 13 ? 'text-danger' : '' }}">{{ $selectedBatterCount }}</span> / 13
                         </span>
                     </div>
-                    <select class="form-select form-select-sm" data-filter="batters" style="min-width: 160px;">
-                        <option value="">全チーム</option>
-                        @foreach ($batterCandidates->pluck('team.name')->unique()->sort()->filter() as $teamName)
-                            <option value="{{ $teamName }}">{{ $teamName }}</option>
-                        @endforeach
-                    </select>
+                    <div class="d-flex gap-2 align-items-center">
+                        <select class="form-select form-select-sm" data-filter="batters" data-filter-type="team" style="min-width: 160px;">
+                            <option value="">全チーム</option>
+                            @foreach ($batterCandidates->pluck('team.name')->unique()->sort()->filter() as $teamName)
+                                <option value="{{ $teamName }}">{{ $teamName }}</option>
+                            @endforeach
+                        </select>
+                        <div class="dropdown">
+                            <button class="btn btn-sm btn-outline-secondary dropdown-toggle" type="button" data-bs-toggle="dropdown" aria-expanded="false" id="position-filter-btn">
+                                守備位置
+                            </button>
+                            <ul class="dropdown-menu" data-filter="batters" data-filter-type="position" style="max-height: 300px; overflow-y: auto;">
+                                @php
+                                    // 守備位置の定義（表示名 => DB値のマッピング）
+                                    $positionMap = [
+                                        '捕手' => '捕手',
+                                        '一塁手' => '一塁手',
+                                        '二塁手' => '二塁手',
+                                        '三塁手' => '三塁手',
+                                        '遊撃手' => '遊撃手',
+                                        '左翼' => ['左翼', '左翼手'],
+                                        '中堅' => ['中堅', '中堅手'],
+                                        '右翼' => ['右翼', '右翼手'],
+                                    ];
+                                    
+                                    // データベースに存在する守備位置を取得
+                                    $dbPositions = $batterCandidates->pluck('position_1')->filter()->unique()->values()->toArray();
+                                    
+                                    // 表示順序でフィルタリング
+                                    $availablePositions = [];
+                                    foreach ($positionMap as $displayName => $dbValues) {
+                                        $dbValuesArray = is_array($dbValues) ? $dbValues : [$dbValues];
+                                        foreach ($dbValuesArray as $dbValue) {
+                                            if (in_array($dbValue, $dbPositions)) {
+                                                $availablePositions[$displayName] = $dbValue;
+                                                break;
+                                            }
+                                        }
+                                    }
+                                @endphp
+                                @foreach ($availablePositions as $displayName => $dbValue)
+                                    <li>
+                                        <label class="dropdown-item mb-0" style="cursor: pointer;">
+                                            <input type="checkbox" class="form-check-input me-2" value="{{ $dbValue }}" data-position-filter data-display-name="{{ $displayName }}">
+                                            {{ $displayName }}
+                                        </label>
+                                    </li>
+                                @endforeach
+                            </ul>
+                        </div>
+                    </div>
                 </div>
                 <div class="border rounded overflow-auto" style="max-height: 500px;" data-roster-list="batters">
                     <ul class="list-group list-group-flush">
@@ -75,10 +120,21 @@
                                 <label class="form-check d-flex align-items-start gap-2 mb-0">
                                     <input type="checkbox" class="form-check-input mt-1"
                                            name="batters[]" value="{{ $seasonId }}" @checked($checked)>
-                                    <span data-team="{{ $team->name ?? '' }}">
+                                    @php
+                                        // 守備位置の表示名に変換（左翼手→左翼、中堅手→中堅、右翼手→右翼）
+                                        $positionDisplay = $season->position_1 ?? '';
+                                        if ($positionDisplay === '左翼手') {
+                                            $positionDisplay = '左翼';
+                                        } elseif ($positionDisplay === '中堅手') {
+                                            $positionDisplay = '中堅';
+                                        } elseif ($positionDisplay === '右翼手') {
+                                            $positionDisplay = '右翼';
+                                        }
+                                    @endphp
+                                    <span data-team="{{ $team->name ?? '' }}" data-position="{{ $season->position_1 ?? '' }}">
                                         <strong>{{ $player->name ?? '不明選手' }}</strong>
                                         <small class="text-muted d-block">
-                                            {{ $team->name ?? '所属不明' }} |
+                                            {{ $team->name ?? '所属不明' }}@if($positionDisplay) | {{ $positionDisplay }}@endif |
                                             ミート{{ $season->batting_contact ?? 0 }}・パワー{{ $season->batting_power ?? 0 }}・走力{{ $season->running_speed ?? 0 }}
                                         </small>
                                     </span>
@@ -160,19 +216,55 @@
             const checkboxes = container.querySelectorAll('input[type="checkbox"]');
             const max = limits[type];
 
-            const applyFilter = (value) => {
-                const normalized = value?.trim() || '';
+            const applyFilters = () => {
+                const teamFilter = document.querySelector(`[data-filter="${type}"][data-filter-type="team"]`);
+                const positionCheckboxes = document.querySelectorAll(`[data-filter="${type}"][data-filter-type="position"] [data-position-filter]`);
+                
+                const teamValue = (teamFilter?.value || '').trim();
+                const selectedPositions = Array.from(positionCheckboxes)
+                    .filter(cb => cb.checked)
+                    .map(cb => cb.value.trim())
+                    .filter(v => v);
+
                 container.querySelectorAll('li').forEach(item => {
-                    const teamLabel = item.querySelector('[data-team]');
-                    if (!teamLabel) return;
-                    const teamName = (teamLabel.dataset.team || '').trim();
-                    const match = !normalized || teamName === normalized;
-                    item.classList.toggle('d-none', !match);
+                    const span = item.querySelector('[data-team]');
+                    if (!span) return;
+                    
+                    const teamName = (span.dataset.team || '').trim();
+                    const position = (span.dataset.position || '').trim();
+                    
+                    const teamMatch = !teamValue || teamName === teamValue;
+                    const positionMatch = selectedPositions.length === 0 || selectedPositions.includes(position);
+                    
+                    item.classList.toggle('d-none', !(teamMatch && positionMatch));
                 });
+
+                // 守備位置フィルターボタンのテキストを更新
+                if (type === 'batters') {
+                    const positionBtn = document.getElementById('position-filter-btn');
+                    if (positionBtn) {
+                        if (selectedPositions.length === 0) {
+                            positionBtn.textContent = '守備位置';
+                        } else if (selectedPositions.length === 1) {
+                            // 表示名を取得
+                            const checkbox = document.querySelector(`[data-position-filter][value="${selectedPositions[0]}"]`);
+                            const displayName = checkbox ? checkbox.dataset.displayName : selectedPositions[0];
+                            // 表示名に変換（左翼手→左翼、中堅手→中堅、右翼手→右翼）
+                            let displayText = displayName || selectedPositions[0];
+                            if (displayText === '左翼手') displayText = '左翼';
+                            else if (displayText === '中堅手') displayText = '中堅';
+                            else if (displayText === '右翼手') displayText = '右翼';
+                            positionBtn.textContent = displayText;
+                        } else {
+                            positionBtn.textContent = `${selectedPositions.length}件選択`;
+                        }
+                    }
+                }
             };
 
             const update = () => {
-                const selected = Array.from(checkboxes).filter(cb => cb.checked).length;
+                const visibleCheckboxes = Array.from(container.querySelectorAll('li:not(.d-none) input[type="checkbox"]'));
+                const selected = visibleCheckboxes.filter(cb => cb.checked).length;
                 (counters[type] || []).forEach(counter => {
                     if (!counter) return;
                     counter.textContent = selected;
@@ -182,15 +274,48 @@
 
             checkboxes.forEach(cb => cb.addEventListener('change', update));
 
-            const filterSelect = document.querySelector(`[data-filter="${type}"]`);
-            if (filterSelect) {
-                filterSelect.addEventListener('change', () => {
-                    applyFilter(filterSelect.value);
+            // チームフィルター
+            const teamFilter = document.querySelector(`[data-filter="${type}"][data-filter-type="team"]`);
+            if (teamFilter) {
+                teamFilter.addEventListener('change', () => {
+                    applyFilters();
                     update();
                 });
             }
 
-            applyFilter(filterSelect ? filterSelect.value : '');
+            // 守備位置フィルター（チェックボックス）
+            const positionCheckboxes = document.querySelectorAll(`[data-filter="${type}"][data-filter-type="position"] [data-position-filter]`);
+            const positionLabels = document.querySelectorAll(`[data-filter="${type}"][data-filter-type="position"] label.dropdown-item`);
+            
+            positionCheckboxes.forEach(cb => {
+                cb.addEventListener('change', () => {
+                    applyFilters();
+                    update();
+                });
+                // チェックボックスをクリックしたときにドロップダウンが閉じないようにする
+                cb.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                });
+            });
+
+            // ラベルをクリックしたときもドロップダウンが閉じないようにする
+            positionLabels.forEach(label => {
+                label.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                });
+            });
+
+            // ドロップダウンメニュー内のクリックで閉じないようにする
+            if (type === 'batters') {
+                const positionDropdown = document.querySelector(`[data-filter="${type}"][data-filter-type="position"]`);
+                if (positionDropdown) {
+                    positionDropdown.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                    });
+                }
+            }
+
+            applyFilters();
             update();
         });
     });

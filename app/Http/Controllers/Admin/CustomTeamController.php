@@ -38,17 +38,43 @@ class CustomTeamController extends Controller
             ->orderBy('name')
             ->paginate(20);
 
-        return view('admin.custom_teams.index', compact('teams'));
+        $hasTeam = CustomTeam::where('user_id', auth()->id())
+            ->where('type', 'original')
+            ->exists();
+
+        return view('admin.custom_teams.index', compact('teams', 'hasTeam'));
     }
 
     public function create()
     {
+        // 既にチームを持っている場合は作成不可
+        $existingTeam = CustomTeam::where('user_id', auth()->id())
+            ->where('type', 'original')
+            ->first();
+
+        if ($existingTeam) {
+            return redirect()
+                ->route('admin.custom-teams.index')
+                ->withErrors(['error' => '既にオリジナルチームを作成済みです。1アカウントにつき1チームまで作成できます。']);
+        }
+
         $teams = Team::orderBy('name')->get();
         return view('admin.custom_teams.create', compact('teams'));
     }
 
     public function store(Request $request)
     {
+        // 既にチームを持っている場合は作成不可
+        $existingTeam = CustomTeam::where('user_id', auth()->id())
+            ->where('type', 'original')
+            ->first();
+
+        if ($existingTeam) {
+            return redirect()
+                ->route('admin.custom-teams.index')
+                ->withErrors(['error' => '既にオリジナルチームを作成済みです。1アカウントにつき1チームまで作成できます。']);
+        }
+
         $data = $request->validate([
             'name' => ['required', 'string', 'max:255'],
             'base_team_id' => ['required', 'integer', 'exists:teams,id'],
@@ -65,18 +91,28 @@ class CustomTeamController extends Controller
 
         $customTeam = null;
 
-        DB::transaction(function () use (&$customTeam, $data, $baseTeamId, $latestYear) {
-            $customTeam = CustomTeam::create([
-                'user_id' => auth()->id(),
-                'name' => $data['name'],
-                'short_name' => $this->makeShortName($data['name']),
-                'type' => 'original',
-                'year' => $latestYear,
-                'notes' => null,
-            ]);
+        try {
+            DB::transaction(function () use (&$customTeam, $data, $baseTeamId, $latestYear) {
+                $customTeam = CustomTeam::create([
+                    'user_id' => auth()->id(),
+                    'name' => $data['name'],
+                    'short_name' => $this->makeShortName($data['name']),
+                    'type' => 'original',
+                    'year' => $latestYear,
+                    'notes' => null,
+                ]);
 
-            $this->seedRosterFromBaseTeam($customTeam, $baseTeamId, $latestYear);
-        });
+                $this->seedRosterFromBaseTeam($customTeam, $baseTeamId, $latestYear);
+            });
+        } catch (\Illuminate\Database\QueryException $e) {
+            // ユニーク制約違反の場合
+            if ($e->getCode() == '23000' && (str_contains($e->getMessage(), 'Duplicate entry') || str_contains($e->getMessage(), 'uniq_custom_teams_user_id'))) {
+                return redirect()
+                    ->route('admin.custom-teams.index')
+                    ->withErrors(['error' => '既にオリジナルチームを作成済みです。1アカウントにつき1チームまで作成できます。']);
+            }
+            throw $e;
+        }
 
         return redirect()
             ->route('admin.custom-teams.roster.edit', $customTeam)
@@ -123,7 +159,7 @@ class CustomTeamController extends Controller
                 'custom_team_id' => $customTeam->id,
                 'player_season_id' => $season->id,
                 'batting_order' => $index + 1,
-                'position' => $season->position_main ?? null,
+                'position' => $season->position_1 ?? null,
                 'is_pitcher' => false,
                 'is_starting_pitcher' => false,
             ]);
@@ -141,7 +177,7 @@ class CustomTeamController extends Controller
                 'custom_team_id' => $customTeam->id,
                 'player_season_id' => $season->id,
                 'batting_order' => null,
-                'position' => $season->position_main ?? null,
+                'position' => $season->position_1 ?? null,
                 'is_pitcher' => false,
                 'is_starting_pitcher' => false,
             ]);
@@ -268,6 +304,12 @@ class CustomTeamController extends Controller
             });
 
         $batterCandidates = $playerSeasons->filter(function (PlayerSeason $season) {
+            // is_pitcherフラグがtrueの選手は野手リストから除外
+            if ($season->is_pitcher ?? false) {
+                return false;
+            }
+            
+            // 野手としての能力がある選手のみ
             return ($season->batting_contact ?? 0) > 0
                 || ($season->batting_power ?? 0) > 0
                 || ($season->running_speed ?? 0) > 0
@@ -275,9 +317,15 @@ class CustomTeamController extends Controller
         });
 
         $pitcherCandidates = $playerSeasons->filter(function (PlayerSeason $season) {
+            // is_pitcherフラグがtrueの場合、または投手能力がある場合
+            if (($season->is_pitcher ?? false) === true) {
+                return true;
+            }
+            // is_pitcherが設定されていない場合、従来のロジックで判断
             return in_array($season->role, ['starter', 'reliever', 'closer'], true)
                 || ($season->pitcher_velocity ?? 0) > 0
-                || ($season->pitcher_control ?? 0) > 0;
+                || ($season->pitcher_control ?? 0) > 0
+                || ($season->pitcher_stamina ?? 0) > 0;
         });
 
         return view('admin.custom_teams.roster', [

@@ -16,12 +16,23 @@ class AutoLineupService
 
         $batters = $this->selectBatters($seasons);
         $pitcher = $this->selectPitcher($seasons);
-        $relievers = $this->selectRelievers($seasons, $pitcher);
+        $reliefResult = $this->selectRelievers($seasons, $pitcher);
+        
+        // 控え選手を選択（打順に含まれない選手）
+        $benchBatters = $seasons->filter(function (PlayerSeason $season) use ($batters) {
+            // 打順に含まれていない野手を控えとして選択
+            return !$batters->contains('id', $season->id) 
+                && (($season->batting_contact ?? 0) > 0 || ($season->batting_power ?? 0) > 0)
+                && !in_array($season->role, ['starter', 'reliever', 'closer'], true)
+                && ($season->pitcher_velocity ?? 0) === 0;
+        })->take(5); // 控えは最大5人
 
         return [
             'batters' => $batters,
+            'bench_batters' => $benchBatters,
             'pitcher' => $pitcher,
-            'relievers' => $relievers,
+            'relievers' => $reliefResult['relievers'] ?? collect(),
+            'closers' => $reliefResult['closers'] ?? collect(),
         ];
     }
 
@@ -36,7 +47,12 @@ class AutoLineupService
             return $season;
         })->sortByDesc('lineup_score')
         ->take(9)
-        ->values();
+        ->values()
+        ->map(function (PlayerSeason $season, $index) {
+            // 打順1～9番を自動設定
+            $season->batting_order = $index + 1;
+            return $season;
+        });
 
         return $batters;
     }
@@ -58,8 +74,12 @@ class AutoLineupService
         return $pitcher;
     }
 
-    protected function selectRelievers(Collection $seasons, ?PlayerSeason $starter): Collection
+    protected function selectRelievers(Collection $seasons, ?PlayerSeason $starter): array
     {
+        // 中継ぎと抑えを分けて選択
+        $relievers = collect();
+        $closers = collect();
+        
         $candidates = $seasons->filter(function (PlayerSeason $season) use ($starter) {
             if ($starter && $season->id === $starter->id) {
                 return false;
@@ -74,10 +94,29 @@ class AutoLineupService
                 ($season->pitcher_control ?? 0) * 0.35;
             return $season;
         })->sortByDesc('relief_score')
-        ->take(2)
         ->values();
 
-        return $candidates;
+        // 抑えを選択（roleがcloserまたは最高スコアの1人）
+        $closerCandidates = $candidates->filter(function (PlayerSeason $season) {
+            return $season->role === 'closer';
+        });
+        
+        if ($closerCandidates->isNotEmpty()) {
+            $closers = $closerCandidates->take(1);
+        } else {
+            // 抑えがいない場合は、最高スコアの1人を抑えとして扱う
+            $closers = $candidates->take(1);
+        }
+
+        // 中継ぎを選択（抑え以外）
+        $relievers = $candidates->reject(function (PlayerSeason $season) use ($closers) {
+            return $closers->contains('id', $season->id);
+        })->take(2);
+
+        return [
+            'relievers' => $relievers,
+            'closers' => $closers,
+        ];
     }
 }
 

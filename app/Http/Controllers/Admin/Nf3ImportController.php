@@ -70,6 +70,18 @@ class Nf3ImportController extends Controller
         $teamId = $data['team_id'] ?? null;
         $teamName = $data['team_name'] ?? optional(Team::find($teamId))->name;
 
+        // 同じ年度・チームの既存データを削除（重複防止）
+        $query = Nf3BattingRow::where('year', $year);
+        if ($teamId) {
+            $query->where('team_id', $teamId);
+        } else {
+            $query->whereNull('team_id');
+        }
+        if ($teamName) {
+            $query->where('team_name', $teamName);
+        }
+        $deletedCount = $query->delete();
+
         $rows = $parser->parse($data['raw_text']);
 
         foreach ($rows as $row) {
@@ -86,9 +98,14 @@ class Nf3ImportController extends Controller
             ]);
         }
 
+        $message = "インポート完了: {$year} {$teamName} - " . count($rows) . '件保存しました。';
+        if ($deletedCount > 0) {
+            $message .= "（既存データ{$deletedCount}件を削除して上書きしました）";
+        }
+
         return redirect()
             ->back()
-            ->with('status', "インポート完了: {$year} {$teamName} - " . count($rows) . '件保存しました。');
+            ->with('status', $message);
     }
 
     public function pitchingIndex()
@@ -149,6 +166,18 @@ class Nf3ImportController extends Controller
         $teamId = $data['team_id'] ?? null;
         $teamName = $data['team_name'] ?? optional(Team::find($teamId))->name;
 
+        // 同じ年度・チームの既存データを削除（重複防止）
+        $query = Nf3PitchingRow::where('year', $year);
+        if ($teamId) {
+            $query->where('team_id', $teamId);
+        } else {
+            $query->whereNull('team_id');
+        }
+        if ($teamName) {
+            $query->where('team_name', $teamName);
+        }
+        $deletedCount = $query->delete();
+
         $rows = $parser->parse($data['raw_text']);
 
         foreach ($rows as $row) {
@@ -165,9 +194,14 @@ class Nf3ImportController extends Controller
             ]);
         }
 
+        $message = "投手成績インポート完了: {$year} {$teamName} - " . count($rows) . '件保存しました。';
+        if ($deletedCount > 0) {
+            $message .= "（既存データ{$deletedCount}件を削除して上書きしました）";
+        }
+
         return redirect()
             ->back()
-            ->with('status', "投手成績インポート完了: {$year} {$teamName} - " . count($rows) . '件保存しました。');
+            ->with('status', $message);
     }
 }
 
